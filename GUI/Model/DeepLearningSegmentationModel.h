@@ -241,6 +241,9 @@ public:
   /** Select the segmentation layer for AI operations */
   void SetSourceImage(ImageWrapperBase *layer);
 
+  /** Upload current label state to server to preserve existing segmentation */
+  void UploadCurrentLabelState(LabelImageWrapper *seg, LabelType label_id);
+
   /** Reset interactions on the current layer */
   void ResetInteractions();
 

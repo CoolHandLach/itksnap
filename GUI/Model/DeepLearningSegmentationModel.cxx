@@ -753,6 +753,45 @@ DeepLearningSegmentationModel::SetSourceImage(ImageWrapperBase *layer)
 }
 
 void
+DeepLearningSegmentationModel::UploadCurrentLabelState(LabelImageWrapper *seg, LabelType label_id)
+{
+  std::lock_guard<std::mutex> guard(m_Mutex); // Prevent two threads doing IO at once
+
+  // Extract binary mask for the specified label from segmentation
+  using InputImageType = LabelImageWrapperBase::ImageType;
+  using OutputImageType = itk::Image<float, 3>;
+  using ThresholdFilterType = itk::BinaryThresholdImageFilter<InputImageType, OutputImageType>;
+
+  // Create threshold filter to extract only the current label
+  auto threshold = ThresholdFilterType::New();
+  threshold->SetInput(seg->GetImage());
+  threshold->SetLowerThreshold(label_id);
+  threshold->SetUpperThreshold(label_id);
+  threshold->SetInsideValue(1.0);
+  threshold->SetOutsideValue(0.0);
+  threshold->Update();
+
+  OutputImageType::Pointer label_mask = threshold->GetOutput();
+
+  // Prepare multipart data with image and metadata
+  RESTClientType::MultiPartData mpd;
+  std::string buffer_storage;
+  EncodeImage(mpd, label_mask.GetPointer(), buffer_storage);
+
+  // Upload to server
+  RESTClientType cli(m_RESTSharedData);
+  cli.SetServerURL(GetActualServerURL().c_str());
+
+  if (!cli.PostMultipart("update_label_state/%s", &mpd, m_ActiveSession.c_str()))
+  {
+    std::cerr << "RESP:" << cli.GetOutput() << std::endl;
+    throw IRISException("Failed to upload label state");
+  }
+
+  std::cout << "UPLOADED LABEL STATE for label " << label_id << std::endl;
+}
+
+void
 DeepLearningSegmentationModel::ResetInteractions()
 {
   std::lock_guard<std::mutex> guard(m_Mutex); // Prevent two threads doing IO at once
@@ -777,7 +816,27 @@ DeepLearningSegmentationModel::ResetInteractionsIfNeeded()
   auto *gs = m_ParentModel->GetGlobalState();
   if(m_LabelState >= 0 && m_LabelState != gs->GetDrawingColorLabel())
   {
-    this->ResetInteractions();
+    // Upload the current state of the new active label before resetting
+    // This preserves existing segmentation when switching labels
+    auto *seg = m_ParentModel->GetDriver()->GetSelectedSegmentationLayer();
+    if(seg)
+    {
+      try
+      {
+        // Upload current label state for the label we're switching TO
+        this->UploadCurrentLabelState(seg, gs->GetDrawingColorLabel());
+      }
+      catch(const std::exception &e)
+      {
+        // If upload fails, log error but continue with reset
+        std::cerr << "Warning: Failed to upload label state: " << e.what() << std::endl;
+        this->ResetInteractions();
+      }
+    }
+    else
+    {
+      this->ResetInteractions();
+    }
     return true;
   }
   return false;
